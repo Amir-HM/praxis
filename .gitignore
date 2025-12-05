@@ -1,0 +1,55 @@
+# Rättskoll OCR Test - Git Ignore
+# =================================
+
+# Environment
+.env
+venv/
+.venv/
+env/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Output files
+outputs/*.json
+outputs/*.md
+outputs/*.pdf
+
+# Test documents (optional - remove if you want to version control test docs)
+# test_docs/*.pdf
+
+# Streamlit
+.streamlit/secrets.toml
+
+# Logs
+*.log
