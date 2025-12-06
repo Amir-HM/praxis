@@ -1,7 +1,7 @@
 """
 Rättskoll OCR Test - OCR Pipeline
 ==================================
-DeepSeek-OCR integration via Replicate API.
+DeepSeek-OCR integration via Replicate API and Google Gemini integration.
 """
 
 import base64
@@ -19,6 +19,13 @@ from config import (
     MAX_RETRIES,
     RETRY_BASE_DELAY,
     REPLICATE_API_TOKEN,
+    GOOGLE_API_KEY,
+    GEMINI_MODEL,
+    GEMINI_SYSTEM_PROMPT,
+    GEMINI_GENERATION_CONFIG,
+    PROVIDER_REPLICATE,
+    PROVIDER_GEMINI,
+    DEFAULT_PROVIDER,
 )
 from models import OCRPage, OCRResult, ProcessingProgress
 
@@ -30,42 +37,51 @@ class OCRError(Exception):
 
 class OCRPipeline:
     """
-    OCR pipeline using DeepSeek-OCR via Replicate.
-    
-    Features:
-    - Automatic retry with exponential backoff
-    - Progress callbacks for UI updates
-    - Batch processing support
-    - Full provenance tracking (page numbers preserved)
+    OCR pipeline supporting multiple providers (Replicate/DeepSeek, Google/Gemini).
     """
     
     def __init__(
         self,
-        model: str = OCR_MODEL,
-        task_type: str = OCR_TASK_TYPE,
-        resolution: str = OCR_RESOLUTION,
+        provider: str = DEFAULT_PROVIDER,
         max_retries: int = MAX_RETRIES,
     ):
         """
         Initialize OCR pipeline.
         
         Args:
-            model: Replicate model identifier
-            task_type: OCR task type
-            resolution: Image resolution setting
+            provider: OCR provider to use
             max_retries: Maximum retry attempts per page
         """
-        self.model = model
-        self.task_type = task_type
-        self.resolution = resolution
+        self.provider = provider
         self.max_retries = max_retries
         
-        # Validate API token
-        if not REPLICATE_API_TOKEN:
-            raise OCRError(
-                "REPLICATE_API_TOKEN not set. "
-                "Add it to .env file or set as environment variable."
+        # Validate configuration based on provider
+        if self.provider == PROVIDER_REPLICATE:
+            if not REPLICATE_API_TOKEN:
+                raise OCRError(
+                    "REPLICATE_API_TOKEN not set. "
+                    "Add it to .env file or set as environment variable."
+                )
+            self.model = OCR_MODEL
+            self.task_type = OCR_TASK_TYPE
+            self.resolution = OCR_RESOLUTION
+            
+        elif self.provider == PROVIDER_GEMINI:
+            if not GOOGLE_API_KEY:
+                raise OCRError(
+                    "GOOGLE_API_KEY not set. "
+                    "Add it to .env file or set as environment variable."
+                )
+            # Initialize Gemini
+            import google.generativeai as genai
+            genai.configure(api_key=GOOGLE_API_KEY)
+            self.gemini_model = genai.GenerativeModel(
+                model_name=GEMINI_MODEL,
+                system_instruction=GEMINI_SYSTEM_PROMPT,
+                generation_config=GEMINI_GENERATION_CONFIG
             )
+        else:
+            raise OCRError(f"Unknown provider: {provider}")
     
     def image_to_base64(self, image: Image.Image) -> str:
         """
@@ -89,6 +105,29 @@ class OCRPipeline:
         
         return f"data:image/png;base64,{img_base64}"
     
+    def _ocr_with_replicate(self, image: Image.Image) -> str:
+        """Process image with Replicate (DeepSeek)."""
+        image_data = self.image_to_base64(image)
+        output = replicate.run(
+            self.model,
+            input={
+                "image": image_data,
+                "task_type": self.task_type,
+                "resolution_size": self.resolution,
+            }
+        )
+        if isinstance(output, str):
+            return output
+        return "".join(output) if output else ""
+
+    def _ocr_with_gemini(self, image: Image.Image) -> str:
+        """Process image with Google Gemini."""
+        # gemini supports PIL image directly
+        response = self.gemini_model.generate_content(
+            ["Extract all text from this document page in markdown format:", image]
+        )
+        return response.text
+
     def ocr_single_page(
         self,
         image: Image.Image,
@@ -109,25 +148,13 @@ class OCRPipeline:
         
         for attempt in range(self.max_retries):
             try:
-                # Convert image to base64
-                image_data = self.image_to_base64(image)
-                
-                # Call Replicate API
-                output = replicate.run(
-                    self.model,
-                    input={
-                        "image": image_data,
-                        "task_type": self.task_type,
-                        "resolution_size": self.resolution,
-                    }
-                )
-                
-                # Handle output (can be string or generator)
-                if isinstance(output, str):
-                    text = output
+                text = ""
+                if self.provider == PROVIDER_REPLICATE:
+                    text = self._ocr_with_replicate(image)
+                elif self.provider == PROVIDER_GEMINI:
+                    text = self._ocr_with_gemini(image)
                 else:
-                    # If it's a generator, join the output
-                    text = "".join(output) if output else ""
+                    raise OCRError(f"Unknown provider: {self.provider}")
                 
                 processing_time = time.time() - start_time
                 
@@ -222,18 +249,9 @@ class OCRPipeline:
 # CONVENIENCE FUNCTIONS
 # =============================================================================
 
-def ocr_image(image: Image.Image, page_number: int = 1) -> OCRPage:
-    """
-    OCR a single image.
-    
-    Args:
-        image: PIL Image
-        page_number: Page number for reference
-        
-    Returns:
-        OCRPage result
-    """
-    pipeline = OCRPipeline()
+def ocr_image(image: Image.Image, page_number: int = 1, provider: str = DEFAULT_PROVIDER) -> OCRPage:
+    """OCR a single image."""
+    pipeline = OCRPipeline(provider=provider)
     return pipeline.ocr_single_page(image, page_number)
 
 
@@ -241,19 +259,10 @@ def ocr_document(
     images: list[Image.Image],
     filename: str = "document.pdf",
     progress_callback: Optional[Callable[[ProcessingProgress], None]] = None,
+    provider: str = DEFAULT_PROVIDER,
 ) -> OCRResult:
-    """
-    OCR a complete document.
-    
-    Args:
-        images: List of page images
-        filename: Document filename
-        progress_callback: Progress update callback
-        
-    Returns:
-        OCRResult with all pages
-    """
-    pipeline = OCRPipeline()
+    """OCR a complete document."""
+    pipeline = OCRPipeline(provider=provider)
     return pipeline.process_document(images, filename, progress_callback)
 
 
@@ -263,20 +272,22 @@ def ocr_document(
 
 if __name__ == "__main__":
     import sys
+    import argparse
     from pdf_processor import pdf_to_images
     
-    if len(sys.argv) < 2:
-        print("Usage: python ocr_pipeline.py <pdf_path>")
-        print("Example: python ocr_pipeline.py test_docs/sample.pdf")
-        sys.exit(1)
+    parser = argparse.ArgumentParser(description="Run OCR pipeline on a PDF.")
+    parser.add_argument("pdf_path", help="Path to PDF file")
+    parser.add_argument("--provider", choices=[PROVIDER_GEMINI, PROVIDER_REPLICATE], default=DEFAULT_PROVIDER, help="OCR provider")
     
-    pdf_path = sys.argv[1]
-    print(f"🔍 Processing: {pdf_path}")
+    args = parser.parse_args()
+    
+    print(f"🔍 Processing: {args.pdf_path}")
+    print(f"🤖 Provider: {args.provider}")
     
     try:
         # Convert PDF to images
         print("📄 Converting PDF to images...")
-        images = pdf_to_images(pdf_path)
+        images = pdf_to_images(args.pdf_path)
         print(f"   Found {len(images)} pages")
         
         # Process through OCR
@@ -287,8 +298,9 @@ if __name__ == "__main__":
         
         result = ocr_document(
             images,
-            filename=pdf_path,
-            progress_callback=progress_cb
+            filename=args.pdf_path,
+            progress_callback=progress_cb,
+            provider=args.provider
         )
         
         # Show results

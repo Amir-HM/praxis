@@ -149,18 +149,96 @@ class PDFProcessor:
     def get_page_count_from_bytes(self, pdf_bytes: bytes) -> int:
         """
         Get number of pages from PDF bytes without full conversion.
-        
+
         Args:
             pdf_bytes: PDF file as bytes
-            
+
         Returns:
             Number of pages
         """
-        # pdf2image doesn't have pdfinfo_from_bytes, so we use temp file
-        with tempfile.NamedTemporaryFile(suffix=".pdf", delete=True) as tmp:
-            tmp.write(pdf_bytes)
-            tmp.flush()
-            return self.get_page_count(tmp.name)
+        # Try pypdf first (faster, no temp file needed)
+        try:
+            from io import BytesIO
+            from pypdf import PdfReader
+            reader = PdfReader(BytesIO(pdf_bytes))
+            return len(reader.pages)
+        except Exception:
+            # Fallback to pdf2image temp file method
+            with tempfile.NamedTemporaryFile(suffix=".pdf", delete=True) as tmp:
+                tmp.write(pdf_bytes)
+                tmp.flush()
+                return self.get_page_count(tmp.name)
+
+    def generate_thumbnails(
+        self,
+        pdf_bytes: bytes,
+        page_numbers: list[int],
+        thumbnail_dpi: int = 50
+    ) -> dict[int, Image.Image]:
+        """
+        Generate low-resolution thumbnails for specific pages.
+
+        Args:
+            pdf_bytes: PDF file content
+            page_numbers: 1-indexed page numbers to generate thumbnails for
+            thumbnail_dpi: Low DPI for speed (50 recommended)
+
+        Returns:
+            Dict mapping page_number -> PIL Image thumbnail
+        """
+        thumbnails = {}
+
+        for page_num in page_numbers:
+            try:
+                # pdf2image uses 1-indexed pages with first_page/last_page
+                images = convert_from_bytes(
+                    pdf_bytes,
+                    dpi=thumbnail_dpi,
+                    fmt=IMAGE_FORMAT.lower(),
+                    first_page=page_num,
+                    last_page=page_num
+                )
+                if images:
+                    thumbnails[page_num] = images[0]
+            except Exception:
+                # Skip failed pages
+                continue
+
+        return thumbnails
+
+    def from_bytes_selected(
+        self,
+        pdf_bytes: bytes,
+        page_numbers: list[int]
+    ) -> list[tuple[int, Image.Image]]:
+        """
+        Convert only selected pages to images.
+
+        Args:
+            pdf_bytes: PDF file content
+            page_numbers: 1-indexed page numbers to convert
+
+        Returns:
+            List of (page_number, PIL Image) tuples preserving original page numbers
+        """
+        result = []
+
+        for page_num in sorted(page_numbers):
+            try:
+                images = convert_from_bytes(
+                    pdf_bytes,
+                    dpi=self.dpi,
+                    fmt=IMAGE_FORMAT.lower(),
+                    first_page=page_num,
+                    last_page=page_num
+                )
+                if images:
+                    result.append((page_num, images[0]))
+            except Exception as e:
+                # Create placeholder for failed conversions
+                raise PDFProcessingError(f"Failed to convert page {page_num}: {e}")
+
+        return result
 
 
 def pdf_to_images(
